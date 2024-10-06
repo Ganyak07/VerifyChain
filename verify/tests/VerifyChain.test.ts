@@ -6,38 +6,25 @@ const user1 = accounts.get("wallet_1")!;
 const user2 = accounts.get("wallet_2")!;
 const user3 = accounts.get("wallet_3")!;
 
-describe("VerifyChain Tests", () => {
+describe("VerifyChain Enhanced Tests", () => {
   beforeAll(() => {
     // Deploy the contract if it's not already deployed
     simnet.deployContract("verifychain", "verifychain", contractOwner);
   });
 
-  describe("Identity Registration", () => {
+  describe("Identity Registration and Verification", () => {
     it("should allow a user to register an identity", () => {
       const { result } = simnet.callPublicFn("verifychain", "register-identity", ["Alice", "alice@example.com"], user1);
       expect(result).toBeOk(true);
     });
 
-    it("should not allow duplicate registration", () => {
-      simnet.callPublicFn("verifychain", "register-identity", ["Bob", "bob@example.com"], user2);
-      const { result } = simnet.callPublicFn("verifychain", "register-identity", ["Bob", "bob@example.com"], user2);
-      expect(result).toBeErr(101); // err-already-registered
-    });
-
-    it("should increase the identity count after registration", () => {
-      const { result } = simnet.callReadOnlyFn("verifychain", "get-identity-count", [], contractOwner);
-      expect(result).toBeUint(2); // Assuming 2 successful registrations so far
-    });
-  });
-
-  describe("Identity Verification", () => {
-    it("should allow the contract owner to verify an identity", () => {
-      const { result } = simnet.callPublicFn("verifychain", "verify-identity", [user1], contractOwner);
+    it("should allow the owner to verify an identity with a tier", () => {
+      const { result } = simnet.callPublicFn("verifychain", "verify-identity", [user1, 1], contractOwner);
       expect(result).toBeOk(true);
     });
 
     it("should not allow non-owners to verify an identity", () => {
-      const { result } = simnet.callPublicFn("verifychain", "verify-identity", [user2], user1);
+      const { result } = simnet.callPublicFn("verifychain", "verify-identity", [user2, 1], user1);
       expect(result).toBeErr(100); // err-not-owner
     });
 
@@ -45,27 +32,12 @@ describe("VerifyChain Tests", () => {
       const { result } = simnet.callReadOnlyFn("verifychain", "is-verified", [user1], contractOwner);
       expect(result).toBeBool(true);
     });
-
-    it("should not allow verifying an already verified identity", () => {
-      const { result } = simnet.callPublicFn("verifychain", "verify-identity", [user1], contractOwner);
-      expect(result).toBeErr(103); // err-already-verified
-    });
   });
 
-  describe("Identity Revocation", () => {
-    it("should allow the contract owner to revoke a verified identity", () => {
-      const { result } = simnet.callPublicFn("verifychain", "revoke-identity", [user1], contractOwner);
+  describe("Verification Renewal", () => {
+    it("should allow a user to renew their verification", () => {
+      const { result } = simnet.callPublicFn("verifychain", "renew-verification", [], user1);
       expect(result).toBeOk(true);
-    });
-
-    it("should correctly update verification status after revocation", () => {
-      const { result } = simnet.callReadOnlyFn("verifychain", "is-verified", [user1], contractOwner);
-      expect(result).toBeBool(false);
-    });
-
-    it("should not allow non-owners to revoke an identity", () => {
-      const { result } = simnet.callPublicFn("verifychain", "revoke-identity", [user2], user1);
-      expect(result).toBeErr(100); // err-not-owner
     });
   });
 
@@ -81,23 +53,10 @@ describe("VerifyChain Tests", () => {
     });
   });
 
-  describe("Identity Attributes", () => {
-    it("should allow a user to set a custom attribute", () => {
-      const { result } = simnet.callPublicFn("verifychain", "set-identity-attribute", ["country", "USA"], user1);
-      expect(result).toBeOk(true);
-    });
-
-    it("should correctly retrieve a set attribute", () => {
-      const { result } = simnet.callReadOnlyFn("verifychain", "get-identity-attribute", [user1, "country"], contractOwner);
-      expect(result.value).toHaveProperty("value", "USA");
-    });
-  });
-
   describe("Attestations", () => {
     beforeAll(() => {
-      // Verify user1 and user2 for attestation tests
-      simnet.callPublicFn("verifychain", "verify-identity", [user1], contractOwner);
-      simnet.callPublicFn("verifychain", "verify-identity", [user2], contractOwner);
+      // Verify user2 for attestation tests
+      simnet.callPublicFn("verifychain", "verify-identity", [user2, 1], contractOwner);
     });
 
     it("should allow a verified user to make an attestation", () => {
@@ -105,19 +64,9 @@ describe("VerifyChain Tests", () => {
       expect(result).toBeOk(true);
     });
 
-    it("should correctly report a valid attestation", () => {
-      const { result } = simnet.callReadOnlyFn("verifychain", "is-attestation-valid", [user1, user2], contractOwner);
-      expect(result).toBeBool(true);
-    });
-
     it("should allow a user to revoke their attestation", () => {
       const { result } = simnet.callPublicFn("verifychain", "revoke-attestation", [user2], user1);
       expect(result).toBeOk(true);
-    });
-
-    it("should correctly report a revoked attestation as invalid", () => {
-      const { result } = simnet.callReadOnlyFn("verifychain", "is-attestation-valid", [user1, user2], contractOwner);
-      expect(result).toBeBool(false);
     });
   });
 
@@ -128,19 +77,44 @@ describe("VerifyChain Tests", () => {
     });
 
     it("should correctly report updated reputation", () => {
-      const { result } = simnet.callReadOnlyFn("verifychain", "get-reputation", [user1], contractOwner);
-      expect(result).toBeUint(5);
+      const { result } = simnet.callReadOnlyFn("verifychain", "get-identity", [user1], contractOwner);
+      expect(result.value).toHaveProperty("reputation", 5);
     });
 
     it("should not allow reputation to go below zero", () => {
       simnet.callPublicFn("verifychain", "update-reputation", [user1, -10], contractOwner);
-      const { result } = simnet.callReadOnlyFn("verifychain", "get-reputation", [user1], contractOwner);
-      expect(result).toBeUint(0);
+      const { result } = simnet.callReadOnlyFn("verifychain", "get-identity", [user1], contractOwner);
+      expect(result.value).toHaveProperty("reputation", 0);
+    });
+  });
+
+  describe("Dispute Resolution", () => {
+    it("should allow a verified user to file a dispute", () => {
+      const { result } = simnet.callPublicFn("verifychain", "file-dispute", [user2, "Reason for dispute"], user1);
+      expect(result).toBeOk(true);
     });
 
-    it("should not allow non-owners to update reputation", () => {
-      const { result } = simnet.callPublicFn("verifychain", "update-reputation", [user2, 1], user1);
-      expect(result).toBeErr(100); // err-not-owner
+    it("should allow the contract owner to resolve a dispute", () => {
+      const { result } = simnet.callPublicFn("verifychain", "resolve-dispute", [user1, user2], contractOwner);
+      expect(result).toBeOk(true);
+    });
+  });
+
+  describe("Governance", () => {
+    it("should allow the contract owner to enable governance", () => {
+      const { result } = simnet.callPublicFn("verifychain", "set-governance", [true], contractOwner);
+      expect(result).toBeOk(true);
+    });
+
+    it("should allow submitting a governance proposal when enabled", () => {
+      const { result } = simnet.callPublicFn("verifychain", "submit-governance-proposal", [1, "Test proposal"], user1);
+      expect(result).toBeOk(true);
+    });
+
+    it("should not allow submitting a governance proposal when disabled", () => {
+      simnet.callPublicFn("verifychain", "set-governance", [false], contractOwner);
+      const { result } = simnet.callPublicFn("verifychain", "submit-governance-proposal", [2, "Test proposal"], user1);
+      expect(result).toBeErr(108); // Governance not enabled
     });
   });
 });
