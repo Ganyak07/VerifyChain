@@ -1,4 +1,4 @@
-;; VerifyChain:  Digital Identity Verification System
+;; VerifyChain: Advanced Digital Identity Verification System
 
 ;; Constants
 (define-constant contract-owner tx-sender)
@@ -8,8 +8,12 @@
 (define-constant err-already-verified (err u103))
 (define-constant err-not-verified (err u104))
 (define-constant err-invalid-attestation (err u105))
+(define-constant err-invalid-credentials (err u106))
+(define-constant err-expired (err u107))
+(define-constant err-insufficient-reputation (err u108))
+(define-constant err-blacklisted (err u109))
 
-;; Define the data structure for an identity
+;; Data Maps
 (define-map identities
   { address: principal }
   { name: (string-utf8 50),
@@ -17,141 +21,205 @@
     verified: bool,
     timestamp: uint,
     reputation: uint,
-    revoked: bool })
+    revoked: bool,
+    verification-level: uint,
+    last-active: uint,
+    recovery-address: (optional principal) })
 
-;; Define map for identity attributes
 (define-map identity-attributes
   { address: principal, key: (string-utf8 50) }
   { value: (string-utf8 100) })
 
-;; Define map for attestations
 (define-map attestations
   { attester: principal, subject: principal }
-  { timestamp: uint, valid: bool })
+  { timestamp: uint, 
+    valid: bool,
+    expiration: uint,
+    confidence-score: uint })
 
-;; Function to register a new identity
+(define-map verification-methods
+  { address: principal }
+  { kyc-verified: bool,
+    two-factor-enabled: bool,
+    biometric-verified: bool })
+
+(define-map trusted-validators
+  { address: principal }
+  { trust-score: uint,
+    valid-until: uint,
+    verified-count: uint })
+
+(define-map blacklisted-addresses
+  { address: principal }
+  { reason: (string-utf8 100),
+    timestamp: uint })
+
+(define-map recovery-requests
+  { address: principal }
+  { new-address: principal,
+    timestamp: uint,
+    approvals: uint })
+
+;; Basic Identity Functions
 (define-public (register-identity (name (string-utf8 50)) (email (string-utf8 50)))
   (let ((caller tx-sender))
     (match (map-get? identities { address: caller })
-      success err-already-registered
-      failure 
-        (begin
-          (map-set identities
-            { address: caller }
-            { name: name, 
-              email: email, 
-              verified: false, 
-              timestamp: block-height,
-              reputation: u0,
-              revoked: false })
-          (ok true)))))
+           existing-identity
+           err-already-registered
+           (begin
+             (map-set identities
+               { address: caller }
+               { name: name, 
+                 email: email, 
+                 verified: false, 
+                 timestamp: block-height,
+                 reputation: u0,
+                 revoked: false,
+                 verification-level: u0,
+                 last-active: block-height,
+                 recovery-address: none })
+             (ok true)))))
 
-;; Function to verify an identity (only contract owner can do this)
 (define-public (verify-identity (address principal))
   (if (is-eq tx-sender contract-owner)
       (match (map-get? identities { address: address })
-        identity (if (get verified identity)
-                     err-already-verified
-                     (begin
-                       (map-set identities
-                         { address: address }
-                         (merge identity { verified: true }))
-                       (ok true)))
-        err-not-found)
-      err-not-owner))
-
-;; Function to revoke an identity (only contract owner can do this)
-(define-public (revoke-identity (address principal))
-  (if (is-eq tx-sender contract-owner)
-      (match (map-get? identities { address: address })
-        identity (begin
+             identity
+             (if (get verified identity)
+                 err-already-verified
+                 (begin
                    (map-set identities
                      { address: address }
-                     (merge identity { revoked: true }))
-                   (ok true))
-        err-not-found)
+                     (merge identity { verified: true }))
+                   (ok true)))
+             err-not-found)
       err-not-owner))
 
-;; Function to check if an identity is verified
 (define-read-only (is-verified (address principal))
   (match (map-get? identities { address: address })
-    identity (and (get verified identity) (not (get revoked identity)))
-    false))
+         identity
+         (and (get verified identity) (not (get revoked identity)))
+         false))
 
-;; Function to get identity details
-(define-read-only (get-identity (address principal))
-  (map-get? identities { address: address }))
+(define-public (enable-two-factor)
+  (let ((caller tx-sender))
+    (match (map-get? verification-methods { address: caller })
+           method
+           (begin
+             (map-set verification-methods
+               { address: caller }
+               (merge method { two-factor-enabled: true }))
+             (ok true))
+           (begin
+             (map-set verification-methods
+               { address: caller }
+               { kyc-verified: false,
+                 two-factor-enabled: true,
+                 biometric-verified: false })
+             (ok true)))))
 
-;; Function to get the total number of registered identities
-(define-read-only (get-identity-count)
-  (len (map-keys identities)))
-
-;; Function to update email (only identity owner can do this)
-(define-public (update-email (new-email (string-utf8 50)))
+(define-public (initiate-recovery (new-address principal))
   (match (map-get? identities { address: tx-sender })
-    identity (begin
-               (map-set identities
-                 { address: tx-sender }
-                 (merge identity { email: new-email }))
-               (ok true))
-    err-not-found))
+         identity
+         (begin
+           (map-set recovery-requests
+             { address: tx-sender }
+             { new-address: new-address,
+               timestamp: block-height,
+               approvals: u0 })
+           (ok true))
+         err-not-found))
 
-;; Function to add or update an identity attribute
-(define-public (set-identity-attribute (key (string-utf8 50)) (value (string-utf8 100)))
+(define-public (complete-recovery (old-address principal))
+  (match (map-get? recovery-requests { address: old-address })
+         request
+         (if (>= (get approvals request) u3)
+             (match (map-get? identities { address: old-address })
+                    identity
+                    (begin
+                      (map-delete identities { address: old-address })
+                      (map-set identities
+                        { address: (get new-address request) }
+                        identity)
+                      (map-delete recovery-requests { address: old-address })
+                      (ok true))
+                    err-not-found)
+             err-insufficient-reputation)
+         err-not-found))
+
+(define-public (update-activity)
   (match (map-get? identities { address: tx-sender })
-    identity (begin
-               (map-set identity-attributes
-                 { address: tx-sender, key: key }
-                 { value: value })
-               (ok true))
-    err-not-found))
+         identity
+         (begin
+           (map-set identities
+             { address: tx-sender }
+             (merge identity { last-active: block-height }))
+           (ok true))
+         err-not-found))
 
-;; Function to get an identity attribute
-(define-read-only (get-identity-attribute (address principal) (key (string-utf8 50)))
-  (map-get? identity-attributes { address: address, key: key }))
-
-;; Function to make an attestation
-(define-public (make-attestation (subject principal))
-  (let ((attester tx-sender))
-    (if (is-verified attester)
-        (begin
-          (map-set attestations
-            { attester: attester, subject: subject }
-            { timestamp: block-height, valid: true })
-          (ok true))
-        err-not-verified)))
-
-;; Function to revoke an attestation
-(define-public (revoke-attestation (subject principal))
-  (let ((attester tx-sender))
-    (match (map-get? attestations { attester: attester, subject: subject })
-      attestation (begin
-                    (map-set attestations
-                      { attester: attester, subject: subject }
-                      (merge attestation { valid: false }))
-                    (ok true))
-      err-invalid-attestation)))
-
-;; Function to check if an attestation is valid
-(define-read-only (is-attestation-valid (attester principal) (subject principal))
-  (match (map-get? attestations { attester: attester, subject: subject })
-    attestation (get valid attestation)
-    false))
-
-;; Function to update reputation (only contract owner can do this)
-(define-public (update-reputation (address principal) (change int))
+(define-public (upgrade-verification-level (address principal))
   (if (is-eq tx-sender contract-owner)
       (match (map-get? identities { address: address })
-        identity (let ((new-reputation (+ (get reputation identity) change)))
-                   (map-set identities
-                     { address: address }
-                     (merge identity { reputation: (if (< new-reputation u0) u0 new-reputation) }))
-                   (ok true))
-        err-not-found)
+             identity
+             (let ((current-level (get verification-level identity)))
+               (if (< current-level u3)
+                   (begin
+                     (map-set identities
+                       { address: address }
+                       (merge identity { verification-level: (+ current-level u1) }))
+                     (ok true))
+                   (ok true)))
+             err-not-found)
       err-not-owner))
 
-;; Function to get reputation
-(define-read-only (get-reputation (address principal))
+(define-read-only (get-validator-stats (address principal))
+  (map-get? trusted-validators { address: address }))
+
+(define-read-only (is-attestation-expired (attester principal) (subject principal))
+  (match (map-get? attestations { attester: attester, subject: subject })
+         attestation
+         (>= block-height (get expiration attestation))
+         true))
+
+(define-read-only (get-verification-level (address principal))
   (match (map-get? identities { address: address })
-    identity (get reputation identity)
-    u0))
+         identity
+         (get verification-level identity)
+         u0))
+
+(define-public (register-validator)
+  (if (is-verified tx-sender)
+      (begin
+        (map-set trusted-validators
+          { address: tx-sender }
+          { trust-score: u1,
+            valid-until: (+ block-height u52560),
+            verified-count: u0 })
+        (ok true))
+      err-not-verified))
+
+(define-public (blacklist-address (address principal) (reason (string-utf8 100)))
+  (if (is-eq tx-sender contract-owner)
+      (begin
+        (map-set blacklisted-addresses
+          { address: address }
+          { reason: reason,
+            timestamp: block-height })
+        (ok true))
+      err-not-owner))
+
+(define-read-only (is-blacklisted (address principal))
+  (is-some (map-get? blacklisted-addresses { address: address })))
+
+(define-public (approve-recovery (address principal))
+  (let ((validator-info (map-get? trusted-validators { address: tx-sender }))
+        (recovery-info (map-get? recovery-requests { address: address })))
+    (if (and (is-some validator-info) 
+             (is-some recovery-info))
+        (let ((request (unwrap! recovery-info err-not-found)))
+          (begin
+            (map-set recovery-requests
+              { address: address }
+              (merge request { approvals: (+ (get approvals request) u1) }))
+            (ok true)))
+        err-not-verified)))
+
